@@ -2,8 +2,8 @@ name: HR Weekly Report Bot
 
 on:
   schedule:
-    # 매주 수요일 09:00 KST (UTC 00:00)
-    - cron: '0 0 * * 3'
+  # 수정 (수요일 09:00 KST = 화요일 00:00 UTC)
+  - cron: '0 0 * * 2'
   workflow_dispatch: # 수동 실행 버튼 (테스트용)
 
 jobs:
