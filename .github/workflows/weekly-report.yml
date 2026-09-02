@@ -1,10 +1,33 @@
 name: HR Weekly Report Bot
 
+# 발송 대상: 피플팀 아지트 (Incoming Webhook)
+# URL 은 GitHub Secret AGIT_WEBHOOK_URL 에 있다.
+
 on:
   schedule:
-  # 수정 (수요일 09:00 KST = 화요일 00:00 UTC)
-  - cron: '0 0 * * 3'
-  workflow_dispatch: # 수동 실행 버튼 (테스트용)
+    # 목표: 매주 수요일 09:00 KST 전에 발송.
+    # GitHub 스케줄 cron 은 정시 보장이 없고 과거 최대 11시간까지 밀렸다.
+    # 그래서 수요일 새벽부터 다섯 번 시도하고, last_sent.txt 로 주 1회만 실제 발송한다.
+    # cron 은 UTC 기준이고 매시 정각은 혼잡해서 피했다.
+    - cron: '10 15 * * 2'   # 화 15:10 UTC = 수 00:10 KST (여유 8h50m)
+    - cron: '40 17 * * 2'   # 화 17:40 UTC = 수 02:40 KST (여유 6h20m)
+    - cron: '20 20 * * 2'   # 화 20:20 UTC = 수 05:20 KST (여유 3h40m)
+    - cron: '50 22 * * 2'   # 화 22:50 UTC = 수 07:50 KST (여유 1h10m)
+    - cron: '35 23 * * 2'   # 화 23:35 UTC = 수 08:35 KST (여유 0h25m, 마지막 기회)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '이번 주에 이미 발송했어도 강제로 다시 보내기'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 여러 cron 이 겹쳐도 한 번에 하나만 돌게 해서 중복 발송을 막는다.
+concurrency:
+  group: hr-weekly-report
+  cancel-in-progress: false
 
 jobs:
   send-report:
@@ -12,15 +35,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 이번 주 발송 여부 확인
+        id: guard
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          WEEK=$(TZ=Asia/Seoul date +%G-W%V)
+          NOW=$(TZ=Asia/Seoul date '+%Y-%m-%d %H:%M %Z')
+          echo "week=$WEEK" >> "$GITHUB_OUTPUT"
+          echo "현재 시각: $NOW / 대상 주차: $WEEK"
+          if [ "$FORCE" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "-> 강제 발송 모드"
+          elif [ -f last_sent.txt ] && [ "$(cat last_sent.txt)" = "$WEEK" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "-> 이번 주는 이미 발송됨. 건너뜁니다."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "-> 미발송. 발송합니다."
+          fi
+
       - name: Set up Python
+        if: steps.guard.outputs.skip == 'false'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
+        if: steps.guard.outputs.skip == 'false'
         run: pip install -r requirements.txt
 
       - name: Run bot
+        if: steps.guard.outputs.skip == 'false'
         run: python bot.py
         env:
           AGIT_WEBHOOK_URL: ${{ secrets.AGIT_WEBHOOK_URL }}
+
+      # 발송이 실패하면 위 스텝에서 죽으므로 이 스텝은 실행되지 않는다.
+      # 따라서 마커가 안 남고, 다음 cron 이 다시 시도한다.
+      - name: 발송 주차 기록
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          echo "${{ steps.guard.outputs.week }}" > last_sent.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_sent.txt
+          git commit -m "chore: HR Weekly Report 발송 완료 (${{ steps.guard.outputs.week }})"
+          git push
